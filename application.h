@@ -26,12 +26,12 @@ public:
 		std::cout << "Mesh succesfully loaded!" << std::endl;
 
 		em_ = new EMApplication();
-		//rr_ = new RRApplication();
+		rr_ = new RRApplication();
 	}
 	virtual ~Application()
 	{ 
 		delete em_;
-		//delete rr_;
+		delete rr_;
 		delete mesh_data_; 
 	}
 
@@ -43,8 +43,8 @@ public:
 		em_->Run(kResolution, mesh_data_, out_data_);
 		stbi_write_jpg("res_embree.jpg", kResolution, kResolution, 4, out_data_.data(), 120);
 
-		//rr_->Run(kResolution, mesh_data_, out_data_);
-		//stbi_write_jpg("res_radeon.jpg", kResolution, kResolution, 4, out_data_.data(), 120);
+		rr_->Run(kResolution, mesh_data_, out_data_);
+		stbi_write_jpg("res_radeon.jpg", kResolution, kResolution, 4, out_data_.data(), 120);
 	}
 
 private:

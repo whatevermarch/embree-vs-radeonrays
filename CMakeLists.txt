@@ -13,7 +13,8 @@ add_executable(benchmark
     test_em/EMApplication.cpp
     test_rr/RRApplication.h
     test_rr/RRApplication.cpp
-    mesh_data.h)
+    mesh_data.h
+    tiny_obj_loader.cc)
 
 target_include_directories(benchmark PRIVATE
     ${PROJECT_SOURCE_DIR}

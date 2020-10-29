@@ -4,10 +4,10 @@
 #pragma once
 
 #define RTC_VERSION_MAJOR 3
-#define RTC_VERSION_MINOR 11
-#define RTC_VERSION_PATCH 0
-#define RTC_VERSION 31100
-#define RTC_VERSION_STRING "3.11.0"
+#define RTC_VERSION_MINOR 12
+#define RTC_VERSION_PATCH 1
+#define RTC_VERSION 31201
+#define RTC_VERSION_STRING "3.12.1"
 
 #define RTC_MAX_INSTANCE_LEVEL_COUNT 1
 
@@ -21,13 +21,13 @@
 #  define RTC_NAMESPACE 
 #  define RTC_NAMESPACE_BEGIN namespace  {
 #  define RTC_NAMESPACE_END }
-#  define RTC_NAMESPACE_OPEN using namespace ;
+#  define RTC_NAMESPACE_USE using namespace ;
 #  define RTC_API_EXTERN_C
 #  undef EMBREE_API_NAMESPACE
 #else
 #  define RTC_NAMESPACE_BEGIN
 #  define RTC_NAMESPACE_END
-#  define RTC_NAMESPACE_OPEN
+#  define RTC_NAMESPACE_USE
 #  if defined(__cplusplus)
 #    define RTC_API_EXTERN_C extern "C"
 #  else

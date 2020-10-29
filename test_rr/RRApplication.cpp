@@ -207,6 +207,8 @@ RRApplication::RRApplication()
 
 void RRApplication::Run(uint32_t res, MeshData* mesh_data, std::vector<uint32_t>& out_data)
 {
+	std::cout << "Running RadeonRays.." << std::endl;
+
     RRContext context = nullptr;
 	VkQueue   queue = nullptr;
 	vkGetDeviceQueue(device_.get(), queue_family_index_, 0, &queue);
