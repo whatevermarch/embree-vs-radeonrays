@@ -1,9 +1,14 @@
 #include <chrono>
 #include <iostream>
+#include <random>
+#include <cmath>
 
 #ifdef _OPENMP
 #include <omp.h>
 #endif
+
+#include <glm/glm.hpp>
+#include <glm/gtx/rotate_vector.hpp>
 
 #include "test_em/EMApplication.h"
 
@@ -135,8 +140,7 @@ void EMApplication::Run(uint32_t res, MeshData* mesh_data, std::vector<uint32_t>
             queries[i].ray.dir_y = -1.f + (2.f / res) * y;
             queries[i].ray.dir_z = -1.f + (2.f / res) * x;
 
-            queries[i].ray.tnear = 0.001f;
-            queries[i].ray.tfar = 100000.f;
+
 
             queries[i].hit.geomID = RTC_INVALID_GEOMETRY_ID;
             queries[i].hit.primID = RTC_INVALID_GEOMETRY_ID;
@@ -149,17 +153,19 @@ void EMApplication::Run(uint32_t res, MeshData* mesh_data, std::vector<uint32_t>
     //  trace ray streams (warm up)
     rtcIntersect1M(scene, &context, queries.data(), res * res, sizeof(RayHit));
 
-    std::cout << "start timing..." << std::endl;
+    std::cout << "start timing...(coherent)" << std::endl;
     //  measure time
     auto time_start = high_resolution_clock::now();
 
 #ifdef _OPENMP
-    #pragma omp parallel for schedule(guided, 1)
-    for (int tile_idx = 0; tile_idx < num_tiles; tile_idx ++)
+    for (int i = 0; i < 10; i++)
     {
-        auto ray_itr = queries.begin() + (TILE_SIZE * TILE_SIZE) * tile_idx;
-
-        rtcIntersect1M(scene, &context, &(*ray_itr), num_rays_per_tile[tile_idx], sizeof(RayHit));
+        #pragma omp parallel for schedule(guided, 1)
+        for (int tile_idx = 0; tile_idx < num_tiles; tile_idx++)
+        {
+            auto ray_itr = queries.begin() + (TILE_SIZE * TILE_SIZE) * tile_idx;
+            rtcIntersect1M(scene, &context, &(*ray_itr), num_rays_per_tile[tile_idx], sizeof(RayHit));
+        }
     }
 #else
     for (int i = 0; i < 10; i++)
@@ -170,8 +176,94 @@ void EMApplication::Run(uint32_t res, MeshData* mesh_data, std::vector<uint32_t>
 
     duration<double, std::milli> delta_time = time_end - time_start;
 
+    std::cout << "Primary Rays (Coherent): " << "\n";
     std::cout << "Trace time: " << delta_time.count() << "ms\n";
 	std::cout << "Throughput: " << (res * res) / (delta_time.count() * 1e-3) * 1e-6 * 10 << " MRays/s\n";
+
+    //  evaluate next bounce
+    std::default_random_engine generator;
+    std::uniform_real_distribution<float> distribution(0.f, 1.f);
+    /*int k = 0;*/
+    for (RayHit& ray : queries)
+    {
+        unsigned int primID = ray.hit.primID;
+        if (primID == RTC_INVALID_GEOMETRY_ID)
+        {
+            ray.ray.tnear = 0.001f;
+            ray.ray.tfar = 0.f;
+
+            continue;
+        }
+
+        uint32_t indices[3] =
+        { idx_data[primID * 4], idx_data[primID * 4 + 1], idx_data[primID * 4 + 2] };
+
+        //  calculate normal
+        using vec = glm::vec3;
+        vec v0(pos_data[indices[0] * 4], pos_data[indices[0] * 4 + 1], pos_data[indices[0] * 4 + 2]);
+        vec v1(pos_data[indices[1] * 4], pos_data[indices[1] * 4 + 1], pos_data[indices[1] * 4 + 2]);
+        vec v2(pos_data[indices[2] * 4], pos_data[indices[2] * 4 + 1], pos_data[indices[2] * 4 + 2]);
+
+        //  calculate next origin
+        float u = ray.hit.u, v = ray.hit.v;
+        vec hit_point = (1.f - u - v) * v0 + u * v1 + v * v2;
+
+        //  calculate next direction (reflection)
+        vec tangent = glm::normalize(v1 - v0);
+        vec norm = glm::normalize(glm::cross(tangent, v2 - v1));
+        /*vec prev_ray_dir = glm::normalize(vec(ray.ray.dir_x, ray.ray.dir_y, ray.ray.dir_z));
+        vec next_ray_dir = 2.f * glm::dot(-prev_ray_dir, norm) * norm + prev_ray_dir;*/
+
+        //  calculate next direction (ambient occlusion)
+        float azimuth = distribution(generator) * 360.f, zenith = distribution(generator) * 60.f;
+        vec new_tangent = glm::rotate(tangent, azimuth, norm);
+        vec next_ray_dir = glm::rotate(new_tangent, 90.f - zenith, glm::cross(new_tangent, norm));/*
+        if (k++ == 0)
+        {
+            std::cout << "Wrong direction? : " << (glm::dot(norm, next_ray_dir) <= 0) << std::endl;
+        }*/
+
+        ray.ray.org_x = hit_point.x;
+        ray.ray.org_y = hit_point.y;
+        ray.ray.org_z = hit_point.z;
+
+        ray.ray.dir_x = next_ray_dir.x;
+        ray.ray.dir_y = next_ray_dir.y;
+        ray.ray.dir_z = next_ray_dir.z;
+
+        ray.ray.tnear = 0.001f;
+        ray.ray.tfar = 100000.f;
+
+        ray.hit.geomID = RTC_INVALID_GEOMETRY_ID;
+        ray.hit.primID = RTC_INVALID_GEOMETRY_ID;
+    }
+
+    std::cout << "start timing...(incoherent)" << std::endl;
+    //  measure time
+    time_start = high_resolution_clock::now();
+
+#ifdef _OPENMP
+    for (int i = 0; i < 10; i++)
+    {
+        #pragma omp parallel for schedule(guided, 1)
+        for (int tile_idx = 0; tile_idx < num_tiles; tile_idx++)
+        {
+            auto ray_itr = queries.begin() + (TILE_SIZE * TILE_SIZE) * tile_idx;
+            rtcIntersect1M(scene, &context, &(*ray_itr), num_rays_per_tile[tile_idx], sizeof(RayHit));
+        }
+    }
+#else
+    for (int i = 0; i < 10; i++)
+        rtcIntersect1M(scene, &context, queries.data(), res * res, sizeof(RayHit));
+#endif
+
+    time_end = high_resolution_clock::now();
+
+    delta_time = time_end - time_start;
+
+    std::cout << "Secondary Rays (Incoherent): " << "\n";
+    std::cout << "Trace time: " << delta_time.count() << "ms\n";
+    std::cout << "Throughput: " << (res * res) / (delta_time.count() * 1e-3) * 1e-6 * 10 << " MRays/s\n";
 
 #ifdef _OPENMP
     //  gather result
@@ -192,8 +284,23 @@ void EMApplication::Run(uint32_t res, MeshData* mesh_data, std::vector<uint32_t>
 
             if (queries[i].hit.geomID != RTC_INVALID_GEOMETRY_ID)
             {
-                out_data[wi] = 0xff000000 | (uint32_t(queries[i].hit.u * 255) << 8) |
-                    (uint32_t(queries[i].hit.v * 255) << 16);
+                //  UV visualize
+                //out_data[wi] = 0xff000000 | (uint32_t(queries[i].hit.u * 255) << 8) |
+                //    (uint32_t(queries[i].hit.v * 255) << 16);
+
+                //  normal visualize
+                unsigned int primID = queries[i].hit.primID;
+                uint32_t indices[3] =
+                { idx_data[primID * 4], idx_data[primID * 4 + 1], idx_data[primID * 4 + 2] };
+
+                //  calculate normal
+                using vec = glm::vec3;
+                vec v0(pos_data[indices[0] * 4], pos_data[indices[0] * 4 + 1], pos_data[indices[0] * 4 + 2]);
+                vec v1(pos_data[indices[1] * 4], pos_data[indices[1] * 4 + 1], pos_data[indices[1] * 4 + 2]);
+                vec v2(pos_data[indices[2] * 4], pos_data[indices[2] * 4 + 1], pos_data[indices[2] * 4 + 2]);
+                vec norm = glm::normalize(glm::cross(v1 - v0, v2 - v1));
+                out_data[wi] = uint32_t((norm.x + 1.f) / 2 * 255) | (uint32_t((norm.y + 1.f) / 2 * 255) << 8) |
+                    (uint32_t((norm.z + 1.f) / 2 * 255) << 16);
             }
             else
             {
@@ -212,8 +319,23 @@ void EMApplication::Run(uint32_t res, MeshData* mesh_data, std::vector<uint32_t>
 
 			if (queries[i].hit.geomID != RTC_INVALID_GEOMETRY_ID)
 			{
-				out_data[wi] = 0xff000000 | (uint32_t(queries[i].hit.u * 255) << 8) |
-					(uint32_t(queries[i].hit.v * 255) << 16);
+                //  UV visualize
+                //out_data[wi] = 0xff000000 | (uint32_t(queries[i].hit.u * 255) << 8) |
+                //    (uint32_t(queries[i].hit.v * 255) << 16);
+
+                //  normal visualize
+                unsigned int primID = queries[i].hit.primID;
+                uint32_t indices[3] =
+                { idx_data[primID * 4], idx_data[primID * 4 + 1], idx_data[primID * 4 + 2] };
+
+                //  calculate normal
+                using vec = glm::vec3;
+                vec v0(pos_data[indices[0] * 4], pos_data[indices[0] * 4 + 1], pos_data[indices[0] * 4 + 2]);
+                vec v1(pos_data[indices[1] * 4], pos_data[indices[1] * 4 + 1], pos_data[indices[1] * 4 + 2]);
+                vec v2(pos_data[indices[2] * 4], pos_data[indices[2] * 4 + 1], pos_data[indices[2] * 4 + 2]);
+                vec norm = glm::normalize(glm::cross(v1 - v0, v2 - v1));
+                out_data[wi] = uint32_t((norm.x + 1.f) / 2 * 255) | (uint32_t((norm.y + 1.f) / 2 * 255) << 8) |
+                    (uint32_t((norm.z + 1.f) / 2 * 255) << 16);
 			}
 			else
 			{

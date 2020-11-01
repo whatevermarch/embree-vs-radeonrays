@@ -1,6 +1,10 @@
 #include <chrono>
 #include <iostream>
 #include <stack>
+#include <random>
+
+#include <glm/glm.hpp>
+#include <glm/gtx/rotate_vector.hpp>
 
 #include "test_rr/RRApplication.h"
 
@@ -352,7 +356,6 @@ void RRApplication::Run(uint32_t res, MeshData* mesh_data, std::vector<uint32_t>
 	using Ray = RRRay;
 	using Hit = RRHit;
 	std::vector<Ray>   rays(res * res);
-	std::vector<Hit>   hits(res * res);
 
 	for (int x = 0; x < res; ++x)
 	{
@@ -376,7 +379,7 @@ void RRApplication::Run(uint32_t res, MeshData* mesh_data, std::vector<uint32_t>
 	auto rays_buffer =
 		CreateBuffer(VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, rays.size() * sizeof(Ray));
 	auto hits_buffer =
-		CreateBuffer(VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, hits.size() * sizeof(Hit));
+		CreateBuffer(VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, res * res * sizeof(Hit));
 
 	// gather memory requirements
 	VkMemoryRequirements rays_buffer_mem_reqs;
@@ -438,6 +441,7 @@ void RRApplication::Run(uint32_t res, MeshData* mesh_data, std::vector<uint32_t>
 	vkBeginCommandBuffer(trace_cmd_buf, &begin_info);
 	vkCmdResetQueryPool(trace_cmd_buf, query_pool_.get(), 0, 2);
 
+	//	warm up
 	CHECK_RR_CALL(rrCmdIntersect(context,
 		geometry_ptr,
 		RR_INTERSECT_QUERY_CLOSEST,
@@ -448,6 +452,8 @@ void RRApplication::Run(uint32_t res, MeshData* mesh_data, std::vector<uint32_t>
 		hits_ptr,
 		scratch_trace_ptr,
 		trace_command_stream));
+
+	//	measuing time
 	vkCmdWriteTimestamp(trace_cmd_buf, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, query_pool_.get(), 0);
 	for (int i = 0; i < 10; i++)
 	{
@@ -463,9 +469,9 @@ void RRApplication::Run(uint32_t res, MeshData* mesh_data, std::vector<uint32_t>
 			trace_command_stream));
 	}
 	vkCmdWriteTimestamp(trace_cmd_buf, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, query_pool_.get(), 1);
+
 	CHECK_RR_CALL(rrSumbitCommandStream(context, trace_command_stream, nullptr, &wait_event));
 	CHECK_RR_CALL(rrWaitEvent(context, wait_event));
-
 	CHECK_RR_CALL(rrReleaseEvent(context, wait_event));
 	CHECK_RR_CALL(rrReleaseExternalCommandStream(context, trace_command_stream));
 
@@ -482,8 +488,9 @@ void RRApplication::Run(uint32_t res, MeshData* mesh_data, std::vector<uint32_t>
 
 	float delta_time = (time[1] - time[0]) * timestamp_period_ / 1e6f;
 
-	std::cout << "Trace time: " << delta_time << "ms\n";
-	std::cout << "Throughput: " << (res * res) / (delta_time * 1e-3) * 1e-6 * 10 << " MRays/s\n";
+	std::cout << "Primary Rays (Coherent): " << "\n";
+	std::cout << "\tTrace time: " << delta_time << "ms\n";
+	std::cout << "\tThroughput: " << (res * res) / (delta_time * 1e-3) * 1e-6 * 10 << " MRays/s\n";
 
 	auto staging_memory_index =
 		FindDeviceMemoryIndex(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
@@ -552,6 +559,152 @@ void RRApplication::Run(uint32_t res, MeshData* mesh_data, std::vector<uint32_t>
 		throw std::runtime_error("Unable to map memory");
 	}
 
+	//	initialize secondary rays
+	std::default_random_engine generator;
+	std::uniform_real_distribution<float> distribution(0.f, 1.f);
+	for (int x = 0; x < res; ++x)
+	{
+		for (int y = 0; y < res; ++y)
+		{
+			auto i = res * y + x;
+
+			//  normal visualize
+			unsigned int primID = mapped_ptr[i].prim_id;
+			if (primID == ~0u)
+			{
+				rays[i].min_t = 0.001f;
+				rays[i].max_t = 0.f;
+
+				continue;
+			}
+
+			auto idx_data = mesh_data->indices.data();
+			uint32_t indices[3] =
+			{ idx_data[primID * 3], idx_data[primID * 3 + 1], idx_data[primID * 3 + 2] };
+
+			//  calculate normal
+			using vec = glm::vec3;
+			auto pos_data = mesh_data->positions.data();
+			vec v0(pos_data[indices[0] * 3], pos_data[indices[0] * 3 + 1], pos_data[indices[0] * 3 + 2]);
+			vec v1(pos_data[indices[1] * 3], pos_data[indices[1] * 3 + 1], pos_data[indices[1] * 3 + 2]);
+			vec v2(pos_data[indices[2] * 3], pos_data[indices[2] * 3 + 1], pos_data[indices[2] * 3 + 2]);
+
+			//  calculate next origin
+			float u = mapped_ptr[i].uv[0], v = mapped_ptr[i].uv[1];
+			vec hit_point = (1.f - u - v) * v0 + u * v1 + v * v2;
+
+			//  calculate next direction (reflection)
+			vec tangent = glm::normalize(v1 - v0);
+			vec norm = glm::normalize(glm::cross(tangent, v2 - v1));
+			//vec prev_ray_dir = glm::normalize(vec(rays[i].direction[0], rays[i].direction[1], rays[i].direction[2]));
+			//vec next_ray_dir = 2.f * glm::dot(-prev_ray_dir, norm) * norm + prev_ray_dir;
+			
+			//  calculate next direction (ambient occlusion)
+			float azimuth = distribution(generator) * 360.f, zenith = distribution(generator) * 60.f;
+			vec new_tangent = glm::rotate(tangent, azimuth, norm);
+			vec next_ray_dir = glm::rotate(new_tangent, 90.f - zenith, glm::cross(new_tangent, norm));
+
+			rays[i].origin[0] = hit_point.x;
+			rays[i].origin[1] = hit_point.y;
+			rays[i].origin[2] = hit_point.z;
+
+			rays[i].direction[0] = next_ray_dir.x;
+			rays[i].direction[1] = next_ray_dir.y;
+			rays[i].direction[2] = next_ray_dir.z;
+
+			rays[i].min_t = 0.001f;
+			rays[i].max_t = 100000.f;
+		}
+	}
+	vkUnmapMemory(device_.get(), staging_hits_memory.get());
+	// upload to previously allocated buffers
+	UploadMemory(rays, rays_buffer.get());
+
+	//	create new cmd buffer (workaround)
+	VkCommandBuffer trace2_cmd_buf = VK_NULL_HANDLE;
+
+	alloc_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+	alloc_info.pNext = nullptr;
+	alloc_info.commandPool = command_pool_.get();
+	alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+	alloc_info.commandBufferCount = 1u;
+
+	status = vkAllocateCommandBuffers(device_.get(), &alloc_info, &trace2_cmd_buf);
+	if (status != VK_SUCCESS)
+	{
+		throw std::runtime_error("Unable to allocate command buffer");
+	}
+	auto trace2_command_buffer = VkScopedObject<VkCommandBuffer>(trace2_cmd_buf, [&](VkCommandBuffer command_buffer)
+	{
+		vkFreeCommandBuffers(device_.get(), command_pool_.get(), 1, &command_buffer);
+	});
+
+	RRCommandStream trace2_command_stream = nullptr;
+	CHECK_RR_CALL(rrGetCommandStreamFromVkCommandBuffer(context, trace2_command_buffer.get(), &trace2_command_stream));
+
+	begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+	begin_info.pNext = nullptr;
+	begin_info.flags = 0;
+	begin_info.pInheritanceInfo = nullptr;
+
+	vkBeginCommandBuffer(trace2_cmd_buf, &begin_info);
+	vkCmdResetQueryPool(trace2_cmd_buf, query_pool_.get(), 0, 2);
+	//	measuing time
+	vkCmdWriteTimestamp(trace2_cmd_buf, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, query_pool_.get(), 0);
+	for (int i = 0; i < 10; i++)
+	{
+		CHECK_RR_CALL(rrCmdIntersect(context,
+			geometry_ptr,
+			RR_INTERSECT_QUERY_CLOSEST,
+			rays_ptr,
+			res * res,
+			nullptr,
+			RR_INTERSECT_QUERY_OUTPUT_FULL_HIT,
+			hits_ptr,
+			scratch_trace_ptr,
+			trace2_command_stream));
+	}
+	vkCmdWriteTimestamp(trace2_cmd_buf, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, query_pool_.get(), 1);
+
+	CHECK_RR_CALL(rrSumbitCommandStream(context, trace2_command_stream, nullptr, &wait_event));
+	CHECK_RR_CALL(rrWaitEvent(context, wait_event));
+	CHECK_RR_CALL(rrReleaseEvent(context, wait_event));
+	CHECK_RR_CALL(rrReleaseExternalCommandStream(context, trace2_command_stream));
+
+	vkGetQueryPoolResults(device_.get(),
+		query_pool_.get(),
+		0,
+		2,
+		2 * sizeof(std::uint64_t),
+		time,
+		sizeof(std::uint64_t),
+		VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+
+	delta_time = (time[1] - time[0]) * timestamp_period_ / 1e6f;
+
+	std::cout << "Secondary Rays (Incoherent): " << "\n";
+	std::cout << "\tTrace time: " << delta_time << "ms\n";
+	std::cout << "\tThroughput: " << (res * res) / (delta_time * 1e-3) * 1e-6 * 10 << " MRays/s\n";
+
+	status = vkQueueSubmit(queue, 1u, &submit_info, nullptr);
+	if (status != VK_SUCCESS)
+	{
+		throw std::runtime_error("Unable to submit queue");
+	}
+
+	status = vkQueueWaitIdle(queue);
+	if (status != VK_SUCCESS)
+	{
+		throw std::runtime_error("Unable to wait queue");
+	}
+
+	//	map memory to host
+	status = vkMapMemory(device_.get(), staging_hits_memory.get(), 0, VK_WHOLE_SIZE, 0, (void**)&mapped_ptr);
+	if (status != VK_SUCCESS)
+	{
+		throw std::runtime_error("Unable to map memory");
+	}
+
 	for (int y = 0; y < res; ++y)
 	{
 		for (int x = 0; x < res; ++x)
@@ -561,8 +714,25 @@ void RRApplication::Run(uint32_t res, MeshData* mesh_data, std::vector<uint32_t>
 
 			if (mapped_ptr[i].inst_id != ~0u)
 			{
-				out_data[wi] = 0xff000000 | (uint32_t(mapped_ptr[i].uv[0] * 255) << 8) |
-					(uint32_t(mapped_ptr[i].uv[1] * 255) << 16);
+				//  UV visualize
+				/*out_data[wi] = 0xff000000 | (uint32_t(mapped_ptr[i].uv[0] * 255) << 8) |
+					(uint32_t(mapped_ptr[i].uv[1] * 255) << 16);*/
+
+				//  normal visualize
+				unsigned int primID = mapped_ptr[i].prim_id;
+				auto idx_data = mesh_data->indices.data();
+				uint32_t indices[3] =
+				{ idx_data[primID * 3], idx_data[primID * 3 + 1], idx_data[primID * 3 + 2] };
+
+				//  calculate normal
+				using vec = glm::vec3;
+				auto pos_data = mesh_data->positions.data();
+				vec v0(pos_data[indices[0] * 3], pos_data[indices[0] * 3 + 1], pos_data[indices[0] * 3 + 2]);
+				vec v1(pos_data[indices[1] * 3], pos_data[indices[1] * 3 + 1], pos_data[indices[1] * 3 + 2]);
+				vec v2(pos_data[indices[2] * 3], pos_data[indices[2] * 3 + 1], pos_data[indices[2] * 3 + 2]);
+				vec norm = glm::normalize(glm::cross(v1 - v0, v2 - v1));
+				out_data[wi] = uint32_t((norm.x + 1.f) / 2 * 255) | (uint32_t((norm.y + 1.f) / 2 * 255) << 8) |
+					(uint32_t((norm.z + 1.f) / 2 * 255) << 16);
 			}
 			else
 			{

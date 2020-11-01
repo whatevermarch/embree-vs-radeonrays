@@ -12,6 +12,8 @@
 
 #define MESH_DATA_PATH "D:\\Documents\\Researches\\embree-vs-radeonrays\\sponza\\sponza.obj"
 
+//#define EMBREE_ONLY
+
 using namespace std::chrono;
 
 class Application
@@ -26,12 +28,16 @@ public:
 		std::cout << "Mesh succesfully loaded!" << std::endl;
 
 		em_ = new EMApplication();
+#ifndef EMBREE_ONLY
 		rr_ = new RRApplication();
+#endif
 	}
 	virtual ~Application()
 	{ 
 		delete em_;
+#ifndef EMBREE_ONLY
 		delete rr_;
+#endif
 		delete mesh_data_; 
 	}
 
@@ -42,9 +48,10 @@ public:
 
 		em_->Run(kResolution, mesh_data_, out_data_);
 		stbi_write_jpg("res_embree.jpg", kResolution, kResolution, 4, out_data_.data(), 120);
-
+#ifndef EMBREE_ONLY
 		rr_->Run(kResolution, mesh_data_, out_data_);
 		stbi_write_jpg("res_radeon.jpg", kResolution, kResolution, 4, out_data_.data(), 120);
+#endif
 	}
 
 private:
